@@ -11,6 +11,10 @@ import re
 import time
 import socket
 import sys
+
+import traceback
+
+
 from StringIO import StringIO
 
 
@@ -54,6 +58,7 @@ def is_key_load_error(e):
 
 def _tried_enough(tries):
     from fabric.state import env
+    print("Checking if tried enough - {} vs {}".format(tries, env.connection_attempts))
     return tries >= env.connection_attempts
 
 
@@ -377,6 +382,9 @@ def normalize_to_string(host_string):
     """
     return join_host_strings(*normalize(host_string))
 
+import collections
+from pprint import pformat as pf
+Count = collections.Counter()
 
 def connect(user, host, port, cache, seek_gateway=True):
     """
@@ -396,6 +404,7 @@ def connect(user, host, port, cache, seek_gateway=True):
         Whether to try setting up a gateway socket for this connection. Used so
         the actual gateway connection can prevent recursion.
     """
+    print("At top of connect:", pf(Count.most_common()))
     from state import env, output
 
     #
@@ -432,6 +441,10 @@ def connect(user, host, port, cache, seek_gateway=True):
         # Attempt connection
         try:
             tries += 1
+
+            if tries > 1:
+                print("Sleeping for a bit because retrying")
+                time.sleep(tries)
 
             # (Re)connect gateway socket, if needed.
             # Nuke cached client object if not on initial try.
@@ -470,11 +483,14 @@ def connect(user, host, port, cache, seek_gateway=True):
             ssh.SSHException
         ), e:
             msg = str(e)
+            print("msg is:", msg)
             # If we get SSHExceptionError and the exception message indicates
             # SSH protocol banner read failures, assume it's caused by the
             # server load and try again.
             if e.__class__ is ssh.SSHException \
                 and msg == 'Error reading SSH protocol banner':
+                print("Catching ssh error type 1")
+                Count['type 1'] += 1
                 if _tried_enough(tries):
                     raise NetworkError(msg, e)
                 continue
@@ -495,7 +511,11 @@ def connect(user, host, port, cache, seek_gateway=True):
             if e.__class__ is ssh.SSHException \
                 and (password or msg.startswith('Unknown server')) \
                 and not is_key_load_error(e):
-                raise NetworkError(msg, e)
+                print("Catching ssh error type 2")
+                Count['type 2'] += 1
+                if _tried_enough(tries):
+                    raise NetworkError(msg, e)
+                continue
 
             # Otherwise, assume an auth exception, and prompt for new/better
             # password.
@@ -520,6 +540,7 @@ def connect(user, host, port, cache, seek_gateway=True):
             # * In this condition (trying a key file, password is None)
             # ssh raises PasswordRequiredException.
             text = None
+            private_key_prompt = False
             if e.__class__ is ssh.PasswordRequiredException \
                 or is_key_load_error(e):
                 # NOTE: we can't easily say WHICH key's passphrase is needed,
@@ -527,8 +548,18 @@ def connect(user, host, port, cache, seek_gateway=True):
                 # env.key_filename may be a list of keys, so we can't know
                 # which one raised the exception. Best not to try.
                 prompt = "[%s] Passphrase for private key"
+                private_key_prompt = True
                 text = prompt % env.host_string
-            password = prompt_for_password(text)
+            print("\nHave user:", user)
+            print("  host:", host)
+            print("  port:", port)
+            print("  password:", password)
+            if private_key_prompt or not password:
+                Count['password_prompt'] += 1
+                password = prompt_for_password(text)
+            else:
+                Count['password_bypass'] += 1
+                pass
             # Update env.password, env.passwords if empty
             set_password(user, host, port, password)
         # Ctrl-D / Ctrl-C for exit
@@ -605,6 +636,9 @@ def prompt_for_password(prompt=None, no_colon=False, stream=None):
     from fabric.state import env
     handle_prompt_abort("a connection or sudo password")
     stream = stream or sys.stderr
+
+    traceback.print_stack()
+
     # Construct prompt
     default = "[%s] Login password for '%s'" % (env.host_string, env.user)
     password_prompt = prompt if (prompt is not None) else default
